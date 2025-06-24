@@ -12,6 +12,57 @@ class GoogleSheetsHandler:
         self.service = build('sheets', 'v4', credentials=self.credentials)
         self.spreadsheet_id = spreadsheet_id
 
+    def update_ids_in_sheet(self, participant_id: int, chat_id: int, telegram_id: int) -> None:
+        """Находит участника по его ID (столбец B) и обновляет его chat_id (Q) и telegram_id (R)."""
+        try:
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range='A:R'
+            ).execute()
+            values = result.get('values', [])
+            
+            for i, row in enumerate(values[1:], start=2):
+                if len(row) > 1 and row[1] and int(row[1]) == participant_id:
+                    
+                    chat_id_needs_update = len(row) <= 16 or not row[16]
+                    telegram_id_needs_update = len(row) <= 17 or not row[17]
+
+                    if chat_id_needs_update or telegram_id_needs_update:
+                        update_range = f'Q{i}:R{i}'
+                        update_values = [
+                            chat_id if chat_id_needs_update else row[16],
+                            telegram_id if telegram_id_needs_update else row[17]
+                        ]
+                        body = {'values': [update_values]}
+                        self.service.spreadsheets().values().update(
+                            spreadsheetId=self.spreadsheet_id,
+                            range=update_range,
+                            valueInputOption='RAW',
+                            body=body
+                        ).execute()
+                    return
+        except Exception as e:
+            print(f"Error updating IDs in sheet: {e}")
+
+    def find_participant_by_telegram_id(self, telegram_id: int) -> list | None:
+        """Ищет участника по telegram_id в столбце R."""
+        try:
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=self.spreadsheet_id,
+                range='A:R'
+            ).execute()
+            values = result.get('values', [])
+            
+            # Ищем со второй строки, чтобы пропустить заголовок
+            for row in values[1:]:
+                # Проверяем, что в строке есть столбец R и его значение совпадает
+                if len(row) > 17 and row[17] and str(row[17]) == str(telegram_id):
+                    return row
+            return None
+        except Exception as e:
+            print(f"Error finding participant by telegram_id: {e}")
+            return None
+
     def append_row(self, values: List[Any]) -> None:
         """Добавляет новую строку в таблицу."""
         # Получаем текущие значения столбца A
@@ -30,57 +81,50 @@ class GoogleSheetsHandler:
         }
         self.service.spreadsheets().values().append(
             spreadsheetId=self.spreadsheet_id,
-            range='A:M',
+            range='A:R',
             valueInputOption='RAW',
             body=body
         ).execute()
 
-    def update_participant_row(self, participant_id: int, lead_data: Dict[str, Any]) -> None:
-        """Обновляет существующую строку участника, добавляя нового лида."""
-        # Получаем все значения из таблицы
+    def update_participant_row(self, participant_id: int, lead_data: Dict[str, Any], chat_id: int) -> None:
+        """Обновляет существующую строку участника, добавляя нового лида и chat_id."""
         result = self.service.spreadsheets().values().get(
             spreadsheetId=self.spreadsheet_id,
-            range='A:M'
+            range='A:R'
         ).execute()
         values = result.get('values', [])
 
-        # Ищем строку с нужным participant_id
         for i, row in enumerate(values):
             if len(row) > 1 and str(row[1]) == str(participant_id):
-                # Формируем данные для обновления, начиная со столбца B
-                current_values = row[1:4]  # Копируем B, C, D столбцы
+                updated_row = row[:]
+                while len(updated_row) < 18:
+                    updated_row.append('')
+
+                new_lead_values = [
+                    lead_data['child_name'],
+                    lead_data['age'],
+                    lead_data['grade'],
+                    lead_data['telegram'],
+                    lead_data['phone'],
+                    lead_data['parent_name'],
+                    lead_data['parent_phone']
+                ]
+
+                if updated_row[4] == '':
+                    for j, value in enumerate(new_lead_values):
+                        updated_row[4+j] = value
+                    if not updated_row[11]:
+                        updated_row[11] = '0'
+                else:
+                    for j, value in enumerate(new_lead_values):
+                        updated_row[4+j] = f"{updated_row[4+j]}\n{value}"
                 
-                # Добавляем нового лида в существующие данные
-                if len(row) <= 4:  # Если это первый лид
-                    current_values.extend([
-                        lead_data['child_name'],  # E: ФИО лид
-                        lead_data['age'],  # F: Возраст
-                        lead_data['grade'],  # G: Класс
-                        lead_data['telegram'],  # H: Ник в тг
-                        lead_data['phone'],  # I: Номер телефона
-                        lead_data['parent_name'],  # J: ФИО (родитель)
-                        lead_data['parent_phone'],  # K: Номер телефона (родитель)
-                        '0',  # L: Балл
-                        'На проверке'  # M: Статус
-                    ])
-                else:  # Если уже есть лиды
-                    # Добавляем нового лида через перенос строки
-                    current_values.extend([
-                        f"{row[4]}\n{lead_data['child_name']}",  # E: ФИО лид
-                        f"{row[5]}\n{lead_data['age']}",  # F: Возраст
-                        f"{row[6]}\n{lead_data['grade']}",  # G: Класс
-                        f"{row[7]}\n{lead_data['telegram']}",  # H: Ник в тг
-                        f"{row[8]}\n{lead_data['phone']}",  # I: Номер телефона
-                        f"{row[9]}\n{lead_data['parent_name']}",  # J: ФИО (родитель)
-                        f"{row[10]}\n{lead_data['parent_phone']}",  # K: Номер телефона (родитель)
-                        row[11] if len(row) > 11 else '0',  # L: Балл
-                        row[12] if len(row) > 12 else 'На проверке'  # M: Статус
-                    ])
-                
-                # Обновляем строку, начиная со столбца B
-                update_range = f'B{i+1}:M{i+1}'
+                if not updated_row[16]:
+                    updated_row[16] = chat_id
+
+                update_range = f'B{i+1}:R{i+1}'
                 body = {
-                    'values': [current_values]
+                    'values': [updated_row[1:]]
                 }
                 self.service.spreadsheets().values().update(
                     spreadsheetId=self.spreadsheet_id,
@@ -107,7 +151,7 @@ class GoogleSheetsHandler:
         """Получает все лиды участника из таблицы."""
         result = self.service.spreadsheets().values().get(
             spreadsheetId=self.spreadsheet_id,
-            range='A:M'
+            range='A:R'
         ).execute()
         values = result.get('values', [])
         leads = []
