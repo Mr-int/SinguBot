@@ -247,3 +247,4 @@ class GoogleSheetsHandler:
                     body={'values': [row]}
                 ).execute()
                 return
+
