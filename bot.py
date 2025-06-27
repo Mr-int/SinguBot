@@ -4,11 +4,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters, ConversationHandler
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, func
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from program_info import PROGRAM_INFO, POINTS
-from sheets_handler import GoogleSheetsHandler
 from functools import wraps
+from sheets_handler import GoogleSheetsHandler
 
 load_dotenv()
 
@@ -23,40 +20,6 @@ sheets_handler = GoogleSheetsHandler(
     credentials_path='credentials.json',
     spreadsheet_id=os.getenv('SPREADSHEET_ID')
 )
-
-Base = declarative_base()
-engine = create_engine('sqlite:///ambassador.db')
-Session = sessionmaker(bind=engine)
-
-class Participant(Base):
-    __tablename__ = 'participants'
-    
-    id = Column(Integer, primary_key=True)
-    telegram_id = Column(Integer, unique=True)
-    chat_id = Column(Integer, nullable=True)
-    full_name = Column(String)
-    course = Column(Integer)  # 1-4 for college students
-    points = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    leads = relationship("Lead", back_populates="participant")
-
-class Lead(Base):
-    __tablename__ = 'leads'
-    
-    id = Column(Integer, primary_key=True)
-    participant_id = Column(Integer, ForeignKey('participants.id'))
-    full_name = Column(String)
-    age = Column(Integer)
-    grade = Column(Integer)
-    phone = Column(String)
-    telegram_username = Column(String)
-    parent_name = Column(String)
-    parent_phone = Column(String)
-    program_type = Column(String)  # 'camp', 'do', 'college'
-    created_at = Column(DateTime, default=datetime.utcnow)
-    participant = relationship("Participant", back_populates="leads")
-
-Base.metadata.create_all(engine)
 
 REGISTERING = 1
 ADDING_LEAD = 2
@@ -83,10 +46,8 @@ def admin_only(func):
 
 def get_all_chat_ids():
     """Fetches all non-null chat_ids from the participants table."""
-    session = Session()
-    participants = session.query(Participant).filter(Participant.chat_id.isnot(None)).all()
-    chat_ids = [p.chat_id for p in participants]
-    session.close()
+    participants = sheets_handler.get_all_participants()
+    chat_ids = [p['chat_id'] for p in participants if p['chat_id']]
     return chat_ids
 
 def get_main_keyboard():
@@ -117,57 +78,30 @@ async def show_registration_prompt(update: Update):
     await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /start command, checking local DB first, then sheets."""
-    session = Session()
+    """Простая регистрация: если пользователь есть в базе — меню, если нет — регистрация."""
     telegram_id = update.effective_user.id
-    chat_id = update.effective_chat.id
 
-    participant = session.query(Participant).filter_by(telegram_id=telegram_id).first()
+    participant = sheets_handler.find_participant_by_telegram_id(telegram_id)
 
     if participant:
-        if not participant.chat_id:
-            participant.chat_id = chat_id
-            session.commit()
-        
-        sheets_handler.update_ids_in_sheet(
-            participant_id=participant.id, 
-            chat_id=chat_id, 
-            telegram_id=telegram_id
-        )
-        
+        if not participant['chat_id']:
+            sheets_handler.update_participant_chat_id(telegram_id, update.effective_chat.id)
         await update.message.reply_text(
             "С возвращением! Используйте меню для навигации:",
             reply_markup=get_main_keyboard()
         )
     else:
-        sheet_user_row = sheets_handler.find_participant_by_telegram_id(telegram_id)
-        if sheet_user_row:
-            try:
-                participant_id = int(sheet_user_row[1])
-                full_name = sheet_user_row[2] if len(sheet_user_row) > 2 else "Имя не найдено"
-                course = int(sheet_user_row[3]) if len(sheet_user_row) > 3 and sheet_user_row[3].isdigit() else 0
-                
-                new_participant = Participant(
-                    id=participant_id,
-                    telegram_id=telegram_id,
-                    chat_id=chat_id,
-                    full_name=full_name,
-                    course=course
-                )
-                session.merge(new_participant)
-                session.commit()
-                
-                await update.message.reply_text(
-                    "С возвращением! Ваш аккаунт был синхронизирован.",
-                    reply_markup=get_main_keyboard()
-                )
-            except (ValueError, IndexError) as e:
-                logger.error(f"Error syncing user from sheet: {e}. Row: {sheet_user_row}")
-                await show_registration_prompt(update)
-        else:
-            await show_registration_prompt(update)
-
-    session.close()
+        # Дополнительно проверяем Google-таблицу (на всякий случай)
+        in_sheet = False
+        try:
+            row = sheets_handler.find_participant_by_telegram_id(telegram_id)
+            if row:
+                in_sheet = True
+        except Exception as e:
+            logger.error(f"Ошибка при поиске пользователя в Google Sheets: {e}")
+            in_sheet = False
+        # Если нет ни в базе, ни в таблице — регистрация
+        await show_registration_prompt(update)
 
 async def register_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -197,35 +131,19 @@ async def process_registration(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return REGISTERING
         
-        session = Session()
-        participant = Participant(
-            telegram_id=update.effective_user.id,
-            chat_id=update.effective_chat.id,
-            full_name=full_name,
-            course=course
-        )
-        session.add(participant)
-        session.commit()
+        # Получаем максимальный ID из Google-таблицы
+        max_sheet_id = sheets_handler.get_max_id()
+        new_id = max(max_sheet_id, 1) + 1
 
-        # Получаем текущее значение столбца A
-        result = sheets_handler.service.spreadsheets().values().get(
-            spreadsheetId=sheets_handler.spreadsheet_id,
-            range='A:A'
-        ).execute()
-        values = result.get('values', [])
-        column_a_value = values[0][0] if values and len(values[0]) > 0 else ''
-
-        # Добавляем участника в Google таблицу с сохранением значения столбца A
-        sheets_handler.append_row([
-            column_a_value,
-            participant.id,
-            participant.full_name,
-            participant.course,
-            '', '', '', '', '', '', '', '', '', '', '', '',
-            participant.chat_id,
-            participant.telegram_id
-        ])
-        session.close()
+        # Добавляем участника в Google таблицу
+        try:
+            sheets_handler.add_participant(new_id, full_name, course, update.effective_chat.id, update.effective_user.id)
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении строки в Google Sheets: {e}")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при добавлении в Google-таблицу. Попробуйте позже!"
+            )
+            return ConversationHandler.END
         
         await update.message.reply_text(
             "✅ Регистрация успешно завершена!",
@@ -243,9 +161,7 @@ async def process_registration(update: Update, context: ContextTypes.DEFAULT_TYP
         return REGISTERING
 
 async def add_lead(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    session = Session()
-    user = session.query(Participant).filter_by(telegram_id=update.effective_user.id).first()
-    session.close()
+    user = sheets_handler.find_participant_by_telegram_id(update.effective_user.id)
     
     if not user:
         await update.message.reply_text(
@@ -402,53 +318,27 @@ async def process_lead_parent_phone2(update: Update, context: ContextTypes.DEFAU
             return LEAD_PARENT_PHONE2
         if parent_phone.startswith('8'):
             parent_phone = '+7' + parent_phone[1:]
-        session = Session()
-        user = session.query(Participant).filter_by(telegram_id=update.effective_user.id).first()
+        user = sheets_handler.find_participant_by_telegram_id(update.effective_user.id)
         
-        if user and not user.chat_id:
-            user.chat_id = update.effective_chat.id
-            session.commit()
+        if user and (len(user) > 16 and not user[16]):
+            sheets_handler.update_participant_chat_id(update.effective_user.id, update.effective_chat.id)
         
         if not user:
              await update.message.reply_text("Пожалуйста, сначала зарегистрируйтесь, используя команду /start.")
              return ConversationHandler.END
 
         # Создаем нового лида
-        lead = Lead(
-            participant_id=user.id,
-            full_name=context.user_data['lead_full_name'],
-            age=context.user_data['lead_age'],
-            grade=context.user_data['lead_grade'],
-            phone=context.user_data['lead_phone'],
-            telegram_username=context.user_data['lead_telegram'],
-            parent_name=context.user_data['lead_parent'],
-            parent_phone=parent_phone,
-            program_type=context.user_data['lead_type']
-        )
-        session.add(lead)
-        session.commit()
-
-        # Получаем текущее значение столбца A
-        result = sheets_handler.service.spreadsheets().values().get(
-            spreadsheetId=sheets_handler.spreadsheet_id,
-            range='A:A'
-        ).execute()
-        values = result.get('values', [])
-        column_a_value = values[0][0] if values and len(values[0]) > 0 else ''
-
-        # Обновляем данные в Google Sheets
         lead_data = {
-            'child_name': lead.full_name,
-            'age': lead.age,
-            'grade': lead.grade,
-            'telegram': lead.telegram_username,
-            'phone': lead.phone,
-            'parent_name': lead.parent_name,
-            'parent_phone': lead.parent_phone
+            'child_name': context.user_data['lead_full_name'],
+            'age': context.user_data['lead_age'],
+            'grade': context.user_data['lead_grade'],
+            'telegram': context.user_data['lead_telegram'],
+            'phone': context.user_data['lead_phone'],
+            'parent_name': context.user_data['lead_parent'],
+            'parent_phone': parent_phone,
+            'program_type': context.user_data['lead_type']
         }
-        if user:
-            sheets_handler.update_participant_row(user.id, lead_data, user.chat_id)
-        session.close()
+        sheets_handler.add_lead(user[1], lead_data)
         await update.message.reply_text(
             "✅ Лид добавлен успешно! Вам будет начислено 10 баллов после проверки.",
             reply_markup=get_main_keyboard()
@@ -506,15 +396,14 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ConversationHandler.END
         
-    participant_id = int(sheet_user_row[1])
     full_name = sheet_user_row[2]
     course = sheet_user_row[3]
 
     # Получаем баллы из Google Sheets
-    points = sheets_handler.get_participant_points(participant_id)
+    points = sheets_handler.get_participant_points(sheet_user_row[1])
     
     # Получаем лиды из Google Sheets
-    leads = sheets_handler.get_all_leads(participant_id)
+    leads = sheets_handler.get_all_leads(sheet_user_row[1])
     
     # Формируем сообщение со статистикой
     message = (
