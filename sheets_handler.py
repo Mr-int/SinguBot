@@ -65,15 +65,15 @@ class GoogleSheetsHandler:
         ).execute()
         rows = result.get('values', [])
         row_num = len(rows) + 1
-        # Гарантируем 17 элементов (B–R)
-        if len(values) < 17:
-            values += [''] * (17 - len(values))
-        elif len(values) > 17:
-            values = values[:17]
-        # Обновляем диапазон B{row_num}:R{row_num}
+        # Гарантируем 18 элементов (A–R)
+        if len(values) < 18:
+            values += [''] * (18 - len(values))
+        elif len(values) > 18:
+            values = values[:18]
+        # Обновляем диапазон A{row_num}:R{row_num}
         self.service.spreadsheets().values().update(
             spreadsheetId=self.spreadsheet_id,
-            range=f'B{row_num}:R{row_num}',
+            range=f'A{row_num}:R{row_num}',
             valueInputOption='RAW',
             body={'values': [values]}
         ).execute()
@@ -139,12 +139,18 @@ class GoogleSheetsHandler:
         try:
             result = self.service.spreadsheets().values().get(
                 spreadsheetId=self.spreadsheet_id,
-                range='B:L'
+                range='A:R'
             ).execute()
             values = result.get('values', [])
             for row in values:
-                if len(row) > 0 and str(row[0]) == str(participant_id):
-                    return int(row[10]) if len(row) > 10 else 0
+                if len(row) > 1 and str(row[1]) == str(participant_id):
+                    # Баллы находятся в колонке L (индекс 11)
+                    if len(row) > 11 and row[11]:
+                        try:
+                            return int(row[11])
+                        except (ValueError, TypeError):
+                            return 0
+                    return 0
             return 0
         except Exception as e:
             print(f"Error getting participant points: {e}")
@@ -160,30 +166,31 @@ class GoogleSheetsHandler:
             leads = []
             for row in values:
                 if len(row) > 1 and str(row[1]) == str(participant_id):
-                    child_names = row[4].split('\n') if len(row) > 4 and row[4] else []
-                    ages = row[5].split('\n') if len(row) > 5 and row[5] else []
-                    grades = row[6].split('\n') if len(row) > 6 and row[6] else []
-                    telegrams = row[7].split('\n') if len(row) > 7 and row[7] else []
-                    phones = row[8].split('\n') if len(row) > 8 and row[8] else []
-                    parent_names = row[9].split('\n') if len(row) > 9 and row[9] else []
-                    parent_phones = row[10].split('\n') if len(row) > 10 and row[10] else []
-                    max_leads = max(
-                        len(child_names), len(ages), len(grades),
-                        len(telegrams), len(phones),
-                        len(parent_names), len(parent_phones)
-                    )
-                    for i in range(max_leads):
-                        lead = {
-                            'child_name': child_names[i] if i < len(child_names) else '',
-                            'age': ages[i] if i < len(ages) else '',
-                            'grade': grades[i] if i < len(grades) else '',
-                            'telegram': telegrams[i] if i < len(telegrams) else '',
-                            'phone': phones[i] if i < len(phones) else '',
-                            'parent_name': parent_names[i] if i < len(parent_names) else '',
-                            'parent_phone': parent_phones[i] if i < len(parent_phones) else '',
-                            'status': row[12] if len(row) > 12 else 'На проверке'
-                        }
-                        leads.append(lead)
+                    # Проверяем, есть ли данные о лидах
+                    if len(row) > 4 and row[4]:  # Если есть имя ребенка
+                        child_names = row[4].split('\n') if row[4] else []
+                        ages = row[5].split('\n') if len(row) > 5 and row[5] else []
+                        grades = row[6].split('\n') if len(row) > 6 and row[6] else []
+                        telegrams = row[7].split('\n') if len(row) > 7 and row[7] else []
+                        parent_names = row[8].split('\n') if len(row) > 8 and row[8] else []
+                        parent_phones = row[10].split('\n') if len(row) > 10 and row[10] else []  # Колонка K (индекс 10)
+                        
+                        max_leads = max(
+                            len(child_names), len(ages), len(grades),
+                            len(telegrams), len(parent_names), len(parent_phones)
+                        )
+                        
+                        for i in range(max_leads):
+                            lead = {
+                                'child_name': child_names[i] if i < len(child_names) else '',
+                                'age': ages[i] if i < len(ages) else '',
+                                'grade': grades[i] if i < len(grades) else '',
+                                'telegram': telegrams[i] if i < len(telegrams) else '',
+                                'parent_name': parent_names[i] if i < len(parent_names) else '',
+                                'parent_phone': parent_phones[i] if i < len(parent_phones) else '',
+                                'status': row[12] if len(row) > 12 and row[12] else 'На проверке'  # Колонка M (индекс 12)
+                            }
+                            leads.append(lead)
             return leads
         except Exception as e:
             print(f"Error getting leads: {e}")
@@ -208,15 +215,26 @@ class GoogleSheetsHandler:
 
     def add_participant(self, participant_id: int, full_name: str, course: int, chat_id: int = '', telegram_id: int = '') -> None:
         """Добавляет нового участника в Google-таблицу."""
+        # Структура: A(пусто) B C D E F G H I J K L M N O P Q R
         row = [
-            participant_id,      # B
-            full_name,           # C
-            course,              # D
-        ] + [''] * 8 + [        # E–L (8 пустых)
-            '',                 # M — пустой
-        ] + [''] * 3 + [        # N–P (3 пустых)
-            chat_id,            # Q
-            telegram_id         # R
+            '',                 # A - пустой столбец
+            participant_id,      # B - ID участника
+            full_name,           # C - ФИО
+            course,              # D - Курс
+            '',                 # E - ФИО лида (пусто)
+            '',                 # F - Возраст (пусто)
+            '',                 # G - Класс (пусто)
+            '',                 # H - Telegram (пусто)
+            '',                 # I - ФИО родителя (пусто)
+            '',                 # J - пустой столбец
+            '',                 # K - Телефон родителя (пусто)
+            '',                 # L - Баллы (пусто, заполняется вручную)
+            '',                 # M - Статус (пусто, заполняется вручную)
+            '',                 # N - пустой столбец
+            '',                 # O - пустой столбец
+            '',                 # P - пустой столбец
+            chat_id,            # Q - Chat ID
+            telegram_id         # R - Telegram ID
         ]
         self.append_row(row)
 
@@ -230,15 +248,28 @@ class GoogleSheetsHandler:
         values = result.get('values', [])
         for i, row in enumerate(values):
             if len(row) > 1 and str(row[1]) == str(participant_id):
-                # Обновляем данные по лидам (E–K: 5–11)
-                for idx, key in enumerate(['child_name', 'age', 'grade', 'telegram', 'phone', 'parent_name', 'parent_phone']):
-                    col = 4 + idx  # E=4, F=5, ..., K=10
+                # Обновляем данные по лидам (E–K: 4–10)
+                # E=4: ФИО_лида, F=5: Возраст, G=6: Класс, H=7: Telegram, I=8: ФИО_родителя, K=10: Телефон_родителя
+                lead_data_mapping = {
+                    4: 'child_name',      # E: ФИО_лида
+                    5: 'age',             # F: Возраст  
+                    6: 'grade',           # G: Класс
+                    7: 'telegram',        # H: Telegram
+                    8: 'parent_name',     # I: ФИО_родителя
+                    10: 'parent_phone'    # K: Телефон_родителя (пропускаем J)
+                }
+                
+                for col, key in lead_data_mapping.items():
                     if len(row) <= col:
                         row += [''] * (col - len(row) + 1)
                     if row[col]:
                         row[col] += f"\n{lead_data.get(key, '')}"
                     else:
                         row[col] = str(lead_data.get(key, ''))
+                
+                # НЕ ТРОГАЕМ БАЛЛЫ (колонка L) - они заполняются вручную
+                # НЕ ТРОГАЕМ СТАТУС (колонка M) - он заполняется вручную
+                
                 # Обновляем строку в таблице
                 self.service.spreadsheets().values().update(
                     spreadsheetId=self.spreadsheet_id,

@@ -340,7 +340,7 @@ async def process_lead_parent_phone2(update: Update, context: ContextTypes.DEFAU
         }
         sheets_handler.add_lead(user[1], lead_data)
         await update.message.reply_text(
-            "✅ Лид добавлен успешно! Вам будет начислено 10 баллов после проверки.",
+            "✅ Лид добавлен успешно! Баллы будут начислены администратором после проверки.",
             reply_markup=get_main_keyboard()
         )
         return ConversationHandler.END
